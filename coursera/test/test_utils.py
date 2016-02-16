@@ -7,6 +7,7 @@ import datetime
 import os
 import pytest
 import random
+import json
 from time import time
 
 import requests
@@ -15,6 +16,9 @@ import six
 from mock import Mock
 from coursera import utils
 from coursera import coursera_dl
+from coursera import api
+
+from coursera.test.utils import slurp_fixture
 
 
 @pytest.mark.parametrize(
@@ -214,3 +218,22 @@ def test_grab_hidden_video_url():
     p = coursera_dl.grab_hidden_video_url(session,
                                           'http://www.hidden.video')
     assert 'video1.mp4' == p
+
+
+@pytest.mark.parametrize(
+    "input,output", [
+        ('html/supplement-deduplication.html', 'json/supplement-deduplication.json'),
+        ('html/supplement-skip-sites.html', 'json/supplement-skip-sites.json'),
+        ('html/supplement-two-zips.html', 'json/supplement-two-zips.json'),
+    ]
+)
+def test_extract_supplement_links(input, output):
+    page_text = slurp_fixture(input)
+    expected_output = json.loads(slurp_fixture(output))
+
+    course = api.CourseraOnDemand(session=None, course_id='0')
+    output = course._extract_links_from_text(page_text)
+    # This is the easiest way to convert nested tuples to lists
+    output = json.loads(json.dumps(output))
+
+    assert expected_output == output

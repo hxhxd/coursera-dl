@@ -59,10 +59,6 @@ from distutils.version import LooseVersion as V
 import requests
 
 from six import iteritems
-from bs4 import BeautifulSoup as BeautifulSoup_
-
-# Force us of bs4 with html5lib
-BeautifulSoup = lambda page: BeautifulSoup_(page, 'html5lib')
 
 
 from .cookies import (
@@ -70,10 +66,12 @@ from .cookies import (
     get_cookies_for_class, make_cookie_values, login, TLSAdapter)
 from .credentials import get_credentials, CredentialsError, keyring
 from .define import (CLASS_URL, ABOUT_URL, PATH_CACHE,
-                     OPENCOURSE_CONTENT_URL, OPENCOURSE_VIDEO_URL)
+                     OPENCOURSE_CONTENT_URL)
 from .downloaders import get_downloader
 from .utils import (clean_filename, get_anchor_format, mkdir_p, fix_url,
-                    decode_input, make_coursera_absolute_url)
+                    decode_input, BeautifulSoup)
+from .network import get_page
+from .api import CourseraOnDemand
 
 # URL containing information about outdated modules
 _SEE_URL = " See https://github.com/coursera-dl/coursera/issues/139"
@@ -88,62 +86,6 @@ assert V(six.__version__) >= V('1.5'), "Upgrade six!" + _SEE_URL
 assert V(bs4.__version__) >= V('4.1'), "Upgrade bs4!" + _SEE_URL
 
 
-def get_on_demand_video_url(session, video_id, subtitle_language='en',
-                            resolution='540p'):
-    """
-    Return the download URL of on-demand course video.
-    """
-
-    url = OPENCOURSE_VIDEO_URL.format(video_id=video_id)
-    page = get_page(session, url)
-
-    logging.debug('Parsing JSON for video_id <%s>.', video_id)
-    video_content = {}
-    dom = json.loads(page)
-
-    # videos
-    logging.info('Gathering video URLs for video_id <%s>.', video_id)
-    sources = dom['sources']
-    sources.sort(key=lambda src: src['resolution'])
-    sources.reverse()
-
-    # Try to select resolution requested by the user.
-    filtered_sources = [source
-                        for source in sources
-                        if source['resolution'] == resolution]
-
-    if len(filtered_sources) == 0:
-        # We will just use the 'vanilla' version of sources here, instead of
-        # filtered_sources.
-        logging.warn('Requested resolution %s not availaboe for <%s>. '
-                     'Downloading highest resolution available instead.',
-                     resolution, video_id)
-    else:
-        logging.info('Proceeding with download of resolution %s of <%s>.',
-                     resolution, video_id)
-        sources = filtered_sources
-
-    video_url = sources[0]['formatSources']['video/mp4']
-    video_content['mp4'] = video_url
-
-    # subtitles
-    logging.info('Gathering subtitle URLs for video_id <%s>.', video_id)
-    subtitles = dom.get('subtitles')
-    if subtitles is not None:
-        if subtitle_language != 'en' and subtitle_language not in subtitles:
-            logging.warning("Subtitle unavailable in '%s' language for video "
-                            "with video id: [%s], falling back to 'en' "
-                            "subtitle", subtitle_language, video_id)
-            subtitle_language = 'en'
-
-        subtitle_url = subtitles.get(subtitle_language)
-        if subtitle_url is not None:
-            # some subtitle urls are relative!
-            video_content['srt'] = make_coursera_absolute_url(subtitle_url)
-
-    return video_content
-
-
 def get_syllabus_url(class_name, preview):
     """
     Return the Coursera index/syllabus URL.
@@ -156,22 +98,6 @@ def get_syllabus_url(class_name, preview):
     logging.debug('Using %s mode with page: %s', class_type, page)
 
     return page
-
-
-def get_page(session, url):
-    """
-    Download an HTML page using the requests session.
-    """
-
-    r = session.get(url)
-
-    try:
-        r.raise_for_status()
-    except requests.exceptions.HTTPError as e:
-        logging.error("Error %s getting page %s", e, url)
-        raise
-
-    return r.text
 
 
 def get_session():
@@ -382,6 +308,8 @@ def parse_on_demand_syllabus(session, page, reverse=False, intact_fnames=False,
                  'This may take some time, be patient ...')
     modules = []
     json_modules = dom['courseMaterial']['elements']
+    course = CourseraOnDemand(session, dom['id'])
+
     for module in json_modules:
         module_slug = module['slug']
         sections = []
@@ -392,18 +320,30 @@ def parse_on_demand_syllabus(session, page, reverse=False, intact_fnames=False,
             json_lectures = section['elements']
             for lecture in json_lectures:
                 lecture_slug = lecture['slug']
-                if lecture['content']['typeName'] == 'lecture':
-                    lecture_video_id = lecture['content']['definition']['videoId']
-                    video_content = get_on_demand_video_url(session,
-                                                            lecture_video_id,
-                                                            subtitle_language,
-                                                            video_resolution)
-                    lecture_video_content = {}
-                    for key, value in video_content.items():
-                        lecture_video_content[key] = [(value, '')]
+                typename = lecture['content']['typeName']
 
-                    if lecture_video_content:
-                        lectures.append((lecture_slug, lecture_video_content))
+                if typename == 'lecture':
+                    lecture_video_id = lecture['content']['definition']['videoId']
+                    assets = lecture['content']['definition'].get('assets', [])
+
+                    links = course.extract_links_from_lecture(
+                        lecture_video_id, subtitle_language,
+                        video_resolution, assets)
+
+                    if links:
+                        lectures.append((lecture_slug, links))
+
+                elif typename == 'supplement':
+                    supplement_content = course.extract_links_from_supplement(
+                        lecture['id'])
+                    if supplement_content:
+                        lectures.append((lecture_slug, supplement_content))
+
+                elif typename in ('gradedProgramming', 'ungradedProgramming'):
+                    supplement_content = course.extract_links_from_programming(
+                        lecture['id'])
+                    if supplement_content:
+                        lectures.append((lecture_slug, supplement_content))
 
             if lectures:
                 sections.append((section_slug, lectures))
@@ -500,6 +440,10 @@ def find_resources_to_get(lecture, file_formats, resource_filter, ignored_format
 
     for fmt, resources in iteritems(lecture):
 
+        fmt0 = fmt
+        if '.' in fmt:
+            fmt = fmt.split('.')[1]
+
         if fmt in ignored_formats:
             continue
 
@@ -509,7 +453,7 @@ def find_resources_to_get(lecture, file_formats, resource_filter, ignored_format
                     logging.debug('Skipping b/c of rf: %s %s',
                                   resource_filter, r[1])
                     continue
-                resources_to_get.append((fmt, r[0], r[1]))
+                resources_to_get.append((fmt0, r[0], r[1]))
         else:
             logging.debug(
                 'Skipping b/c format %s not in %s', fmt, file_formats)
@@ -598,7 +542,7 @@ def download_lectures(downloader,
 
             for (_path, subdirs, files) in os.walk(sec):
                 os.chdir(_path)
-                globbed_videos = glob.glob("*.mp4")
+                globbed_videos = sorted(glob.glob("*.mp4"))
                 m3u_name = os.path.split(_path)[1] + ".m3u"
 
                 if len(globbed_videos):
@@ -686,8 +630,9 @@ def parse_args(args=None):
                              '--subtitle-language',
                              dest='subtitle_language',
                              action='store',
-                             default='en',
-                             help='Choose language to download subtitles. (Default: en)')
+                             default='all',
+                             help='Choose language to download subtitles and transcripts. (Default: all)'
+                             'Use special value "all" to download all available.')
 
     # Selection of material to download
     group_material = parser.add_argument_group('Selection of material to download')
@@ -1103,7 +1048,7 @@ def main():
     if args.on_demand:
         logging.warning('--on-demand option is deprecated and is not required'
                         ' anymore. Do not use this option. It will be removed'
-                        'in the future.')
+                        ' in the future.')
 
     for class_name in args.class_names:
         try:

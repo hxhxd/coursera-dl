@@ -58,7 +58,7 @@ generate_readme_rst()
 long_description = read_file(
     'README.rst',
     'Generate README.rst from README.md via pandoc!\n\nExample: '
-    'pandoc --from=markdown_github --to=rst --output=README.rst README.md'
+    'pandoc --from=markdown --to=rst --output=README.rst README.md'
 )
 requirements = read_file('requirements.txt')
 dev_requirements = read_file('requirements-dev.txt')
@@ -75,6 +75,7 @@ trove_classifiers = [
     'Programming Language :: Python :: 3',
     'Programming Language :: Python :: 3.3',
     'Programming Language :: Python :: 3.4',
+    'Programming Language :: Python :: 3.5',
     'Programming Language :: Python :: Implementation :: CPython',
     'Programming Language :: Python :: Implementation :: PyPy',
     'Programming Language :: Python',
@@ -83,12 +84,12 @@ trove_classifiers = [
 
 setup(
     name='coursera',
-    version='0.1.0a3',
+    version='0.5.2',
     maintainer='Rogério Theodoro de Brito',
     maintainer_email='rbrito@ime.usp.br',
 
     license='LGPL',
-    url='https://github.com/coursera-dl/coursera',
+    url='https://github.com/coursera-dl/coursera-dl',
 
     install_requires=requirements,
     extras_require=dict(
